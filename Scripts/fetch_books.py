@@ -2,88 +2,124 @@ import os
 import sys
 import requests
 import django
-from tqdm import tqdm  # Importer tqdm pour la barre de progression
+import logging
+from tqdm import tqdm 
+from django.db import transaction
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+logging.basicConfig(level=logging.INFO)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Définir le bon paramètre pour Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mygutenberg.settings')
-
-# Initialiser Django
 django.setup()
 
-from book.models import Book, Author  # Maintenant, ça devrait fonctionner
+from book.models import Book, Author
+
+# Utiliser une session pour réutiliser les connexions HTTP
+session = requests.Session()
+
+def fetch_book_text(book_data):
+    """Récupère le texte intégral d'un livre et retourne son contenu avec le nombre de mots."""
+    text_url = None
+    possible_formats = ['text/plain', 'text/plain; charset=utf-8', 'text/plain; charset=iso-8859-1', 'text/plain; charset=us-ascii']
+
+    for fmt in possible_formats:
+        if fmt in book_data['formats']:
+            text_url = book_data['formats'][fmt]
+            break
+
+    if not text_url:
+        logging.warning(f"Aucun texte disponible pour le livre ID {book_data['id']}.")
+        return None, 0
+
+    try:
+        response = session.get(text_url, timeout=10)
+        if response.status_code == 200:
+            text_content = response.text.strip()
+            if not text_content:
+                logging.warning(f"Le livre ID {book_data['id']} semble vide.")
+                return None, 0
+
+            word_count = len(text_content.split())
+            return text_content[:100000], word_count  # Limite pour éviter les gros fichiers
+    except Exception as e:
+        logging.error(f"Erreur lors du téléchargement du texte du livre {book_data['id']}: {e}")
+
+    return None, 0
+
 
 def fetch_and_insert_books():
-    url = "https://gutendex.com/books/"  # L'URL de l'API avec un paramètre de langue
-    total_books_fetched = 0  # Variable pour compter le nombre total de livres récupérés
-    max_books = 2500  # Limite de livres à récupérer
-    total_books_to_fetch = None  # Total de livres à importer, initialement inconnu
+    logging.info("Début de l'importation des livres...")
+    url = "https://gutendex.com/books/"
+    total_books_fetched = 0
+    max_books = 200
 
-    # Première requête pour obtenir le total de livres
-    response = requests.get(url)
+    response = session.get(url)
     if response.status_code == 200:
         data = response.json()
-        total_books_to_fetch = data.get('count', 0)  # Nombre total de livres dans l'API
+        total_books_to_fetch = data.get('count', 0)
     else:
-        print(f"Failed to fetch total books count: {response.status_code}")
+        logging.error(f"Échec de récupération du nombre total de livres : {response.status_code}")
         return
 
-    # Calculer la limite réelle pour la barre de progression (max 2500 livres)
-    total_to_progress = min(total_books_to_fetch, max_books)
-
-    # Barre de progression globale pour l'importation des livres
-    with tqdm(total=total_to_progress, desc="Importing books", ncols=100, unit="book", position=0) as pbar:
+    with tqdm(total=min(total_books_to_fetch, max_books), desc="Importing books") as pbar, ThreadPoolExecutor(max_workers=5) as executor:
         while url and total_books_fetched < max_books:
-            response = requests.get(url)
+            logging.info(f"Récupération des livres depuis {url}")
+            response = session.get(url)
+
             if response.status_code == 200:
                 data = response.json()
                 books_data = data.get('results', [])
-                total_books_fetched += len(books_data)
-                
-                # Utiliser tqdm pour la mise à jour sans redessiner à chaque livre
-                for book_data in books_data:
-                    # Vérifier si le livre existe déjà pour éviter les doublons
-                    book, created = Book.objects.get_or_create(
-                        id=book_data['id'],
-                        defaults={
-                            'title': book_data['title'],
-                            'language': ', '.join(book_data['languages']),
-                            'description': book_data.get('summaries', [''])[0] if book_data.get('summaries') else '',
-                            'subjects': ', '.join(book_data.get('subjects', [])),
-                            'bookshelves': ', '.join(book_data.get('bookshelves', [])),
-                            'url': f"https://www.gutenberg.org/ebooks/{book_data['id']}",
-                            'cover_image': book_data['formats'].get('image/jpeg', ''),
-                            'download_count': book_data['download_count'],
-                            'copyright': book_data['copyright'] or False
-                        }
-                    )
 
-                    if created:
-                        print(f"Livre importé : {book.title} (ID: {book.id})")
+                futures = {executor.submit(fetch_book_text, book_data): book_data for book_data in books_data}
 
-                    # Ajouter les auteurs au livre
-                    for author_data in book_data.get('authors', []):
-                        author, created = Author.objects.get_or_create(
-                            name=author_data['name'],
-                            defaults={
-                                'birth_year': author_data.get('birth_year'),
-                                'death_year': author_data.get('death_year')
-                            }
-                        )
-                        book.authors.add(author)
+                for future in as_completed(futures):
+                    book_data = futures[future]
+                    try:
+                        book_text, word_count = future.result()
 
-                    pbar.update(1)  # Mettre à jour la barre de progression pour chaque livre
+                        if not book_text or word_count < 10000:
+                            logging.info(f"Livre ignoré : {book_data['title']} (ID: {book_data['id']}), {word_count} mots.")
+                            continue
 
-                # Mettre à jour l'URL pour la page suivante
+                        with transaction.atomic():
+                            book, created = Book.objects.get_or_create(
+                                id=book_data['id'],
+                                defaults={
+                                    'title': book_data['title'],
+                                    'language': ', '.join(book_data['languages']),
+                                    'description': book_data.get('summaries', [''])[0] if book_data.get('summaries') else '',
+                                    'subjects': ', '.join(book_data.get('subjects', [])),
+                                    'bookshelves': ', '.join(book_data.get('bookshelves', [])),
+                                    'cover_image': book_data['formats'].get('image/jpeg', ''),
+                                    'download_count': book_data['download_count'],
+                                    'copyright': book_data.get('copyright', False),
+                                    'text_content': book_text
+                                }
+                            )
+
+                            if created:
+                                logging.info(f"Livre importé : {book.title} (ID: {book.id}) - {word_count} mots.")
+
+                            for author_data in book_data.get('authors', []):
+                                author, _ = Author.objects.get_or_create(
+                                    name=author_data['name'],
+                                    defaults={
+                                        'birth_year': author_data.get('birth_year'),
+                                        'death_year': author_data.get('death_year')
+                                    }
+                                )
+                                book.authors.add(author)
+
+                        pbar.update(1)
+                        total_books_fetched += 1
+
+                    except Exception as e:
+                        logging.error(f"Erreur lors de l'insertion du livre ID {book_data['id']}: {e}")
+
                 url = data.get('next')
-
-                # Afficher le nombre total de livres récupérés après chaque page
-                print(f"Total livres récupérés jusqu'ici : {total_books_fetched}")
-
+                logging.info(f"Livres récupérés jusqu'ici : {total_books_fetched}")
             else:
-                print(f"Failed to fetch books: {response.status_code}")
+                logging.error(f"Échec de récupération des livres : {response.status_code}")
                 break
 
-# Appeler la fonction pour insérer les livres dans la base de données
 fetch_and_insert_books()
