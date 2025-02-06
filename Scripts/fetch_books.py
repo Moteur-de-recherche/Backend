@@ -1,11 +1,13 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import sys
 import requests
 import django
 import logging
-from tqdm import tqdm 
+import time
+from tqdm import tqdm
 from django.db import transaction
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.exceptions import RequestException
 
 logging.basicConfig(level=logging.INFO)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -14,11 +16,13 @@ django.setup()
 
 from book.models import Book, Author
 
-# Utiliser une session pour réutiliser les connexions HTTP
 session = requests.Session()
 
+MAX_RETRIES = 5  # Nombre maximum de tentatives
+BACKOFF_FACTOR = 2  # Facteur de backoff exponentiel (attente doublée à chaque tentative)
+TIMEOUT = 10  # Timeout initial en secondes
+
 def fetch_book_text(book_data):
-    """Récupère le texte intégral d'un livre et retourne son contenu avec le nombre de mots."""
     text_url = None
     possible_formats = ['text/plain', 'text/plain; charset=utf-8', 'text/plain; charset=iso-8859-1', 'text/plain; charset=us-ascii']
 
@@ -31,28 +35,77 @@ def fetch_book_text(book_data):
         logging.warning(f"Aucun texte disponible pour le livre ID {book_data['id']}.")
         return None, 0
 
-    try:
-        response = session.get(text_url, timeout=10)
-        if response.status_code == 200:
-            text_content = response.text.strip()
-            if not text_content:
-                logging.warning(f"Le livre ID {book_data['id']} semble vide.")
-                return None, 0
+    attempt = 0
+    while attempt < MAX_RETRIES:
+        try:
+            response = session.get(text_url, timeout=TIMEOUT)
+            if response.status_code == 200:
+                text_content = response.text.strip()
+                if not text_content:
+                    logging.warning(f"Le livre ID {book_data['id']} semble vide.")
+                    return None, 0
+                word_count = len(text_content.split())
+                return text_content[:100000], word_count
+        except RequestException as e:
+            attempt += 1
+            backoff_time = BACKOFF_FACTOR ** attempt  # Exponential backoff
+            logging.error(f"Erreur lors du téléchargement du livre {book_data['id']}: {e}. Tentative {attempt}/{MAX_RETRIES}. Nouvelle tentative dans {backoff_time}s...")
+            time.sleep(backoff_time)
+        except Exception as e:
+            logging.error(f"Erreur inattendue pour le livre {book_data['id']}: {e}")
+            break
 
-            word_count = len(text_content.split())
-            return text_content[:100000], word_count  # Limite pour éviter les gros fichiers
-    except Exception as e:
-        logging.error(f"Erreur lors du téléchargement du texte du livre {book_data['id']}: {e}")
-
+    logging.error(f"Échec du téléchargement du livre {book_data['id']} après {MAX_RETRIES} tentatives.")
     return None, 0
 
+def process_book(book_data):
+    try:
+        book_text, word_count = fetch_book_text(book_data)
 
-def fetch_and_insert_books():
+        if not book_text or word_count < 10000:
+            logging.info(f"Livre ignoré : {book_data['title']} (ID: {book_data['id']}), {word_count} mots.")
+            return None
+
+        with transaction.atomic():
+            book, created = Book.objects.get_or_create(
+                id=book_data['id'],
+                defaults={  # Defaults pour un nouveau livre
+                    'title': book_data['title'],
+                    'language': ', '.join(book_data['languages']),
+                    'description': book_data.get('summaries', [''])[0] if book_data.get('summaries') else '',
+                    'subjects': ', '.join(book_data.get('subjects', [])),
+                    'bookshelves': ', '.join(book_data.get('bookshelves', [])),
+                    'cover_image': book_data['formats'].get('image/jpeg', ''),
+                    'download_count': book_data['download_count'],
+                    'copyright': book_data.get('copyright', False),
+                    'text_content': book_text
+                }
+            )
+
+            if created:
+                logging.info(f"Livre importé : {book.title} (ID: {book.id}) - {word_count} mots.")
+
+            for author_data in book_data.get('authors', []):
+                author, _ = Author.objects.get_or_create(
+                    name=author_data['name'],
+                    defaults={
+                        'birth_year': author_data.get('birth_year'),
+                        'death_year': author_data.get('death_year')
+                    }
+                )
+                book.authors.add(author)
+
+        return book
+
+    except Exception as e:
+        logging.error(f"Erreur lors de l'insertion du livre ID {book_data['id']}: {e}")
+        return None
+
+def fetch_and_insert_books(max_books=50, workers=5):
     logging.info("Début de l'importation des livres...")
     url = "https://gutendex.com/books/"
     total_books_fetched = 0
-    max_books = 200
-
+    
     response = session.get(url)
     if response.status_code == 200:
         data = response.json()
@@ -61,65 +114,32 @@ def fetch_and_insert_books():
         logging.error(f"Échec de récupération du nombre total de livres : {response.status_code}")
         return
 
-    with tqdm(total=min(total_books_to_fetch, max_books), desc="Importing books") as pbar, ThreadPoolExecutor(max_workers=5) as executor:
-        while url and total_books_fetched < max_books:
-            logging.info(f"Récupération des livres depuis {url}")
-            response = session.get(url)
+    with tqdm(total=min(total_books_to_fetch, max_books), desc="Importing books") as pbar:
+        books_to_process = []
+        futures = []
 
-            if response.status_code == 200:
-                data = response.json()
-                books_data = data.get('results', [])
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            while url and total_books_fetched < max_books:
+                logging.info(f"Récupération des livres depuis {url}")
+                response = session.get(url)
 
-                futures = {executor.submit(fetch_book_text, book_data): book_data for book_data in books_data}
+                if response.status_code == 200:
+                    data = response.json()
+                    books_data = data.get('results', [])
 
-                for future in as_completed(futures):
-                    book_data = futures[future]
-                    try:
-                        book_text, word_count = future.result()
-
-                        if not book_text or word_count < 10000:
-                            logging.info(f"Livre ignoré : {book_data['title']} (ID: {book_data['id']}), {word_count} mots.")
-                            continue
-
-                        with transaction.atomic():
-                            book, created = Book.objects.get_or_create(
-                                id=book_data['id'],
-                                defaults={
-                                    'title': book_data['title'],
-                                    'language': ', '.join(book_data['languages']),
-                                    'description': book_data.get('summaries', [''])[0] if book_data.get('summaries') else '',
-                                    'subjects': ', '.join(book_data.get('subjects', [])),
-                                    'bookshelves': ', '.join(book_data.get('bookshelves', [])),
-                                    'cover_image': book_data['formats'].get('image/jpeg', ''),
-                                    'download_count': book_data['download_count'],
-                                    'copyright': book_data.get('copyright', False),
-                                    'text_content': book_text
-                                }
-                            )
-
-                            if created:
-                                logging.info(f"Livre importé : {book.title} (ID: {book.id}) - {word_count} mots.")
-
-                            for author_data in book_data.get('authors', []):
-                                author, _ = Author.objects.get_or_create(
-                                    name=author_data['name'],
-                                    defaults={
-                                        'birth_year': author_data.get('birth_year'),
-                                        'death_year': author_data.get('death_year')
-                                    }
-                                )
-                                book.authors.add(author)
-
-                        pbar.update(1)
-                        total_books_fetched += 1
-
-                    except Exception as e:
-                        logging.error(f"Erreur lors de l'insertion du livre ID {book_data['id']}: {e}")
+                    for book_data in books_data:
+                        futures.append(executor.submit(process_book, book_data))
+                    
+                    # Attendre que les tâches en cours se terminent
+                    for future in as_completed(futures):
+                        book = future.result()
+                        if book:
+                            books_to_process.append(book)
+                            pbar.update(1)
+                            total_books_fetched += 1
 
                 url = data.get('next')
                 logging.info(f"Livres récupérés jusqu'ici : {total_books_fetched}")
-            else:
-                logging.error(f"Échec de récupération des livres : {response.status_code}")
-                break
+                time.sleep(0.1)  # Optionnel : pour éviter de surcharger les serveurs en envoyant trop de requêtes trop rapidement.
 
-fetch_and_insert_books()
+fetch_and_insert_books(max_books=50, workers=10)  # Vous pouvez ajuster le nombre de workers ici.
