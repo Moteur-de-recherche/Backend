@@ -109,13 +109,6 @@ def index_books_concurrently():
     
     logging.info("Indexation des livres terminée.")
 
-def enable_write_concurrency():
-    cursor = connection.cursor()
-    cursor.execute("PRAGMA synchronous=NORMAL;")  # Améliore les performances
-    cursor.execute("PRAGMA busy_timeout=10000;")  # Attend 10 secondes avant d'échouer
-    cursor.close()
-
 # Exécution du script
 if __name__ == "__main__":
-    enable_write_concurrency()
     index_books_concurrently()

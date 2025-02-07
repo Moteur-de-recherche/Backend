@@ -20,7 +20,7 @@ session = requests.Session()
 
 MAX_RETRIES = 5  # Nombre maximum de tentatives
 BACKOFF_FACTOR = 2  # Facteur de backoff exponentiel (attente doublée à chaque tentative)
-TIMEOUT = 10  # Timeout initial en secondes
+TIMEOUT = 30  # Timeout initial en secondes
 
 def fetch_book_text(book_data):
     text_url = None
@@ -140,6 +140,6 @@ def fetch_and_insert_books(max_books=50, workers=5):
 
                 url = data.get('next')
                 logging.info(f"Livres récupérés jusqu'ici : {total_books_fetched}")
-                time.sleep(0.1)  # Optionnel : pour éviter de surcharger les serveurs en envoyant trop de requêtes trop rapidement.
+                time.sleep(0.5)  # Optionnel : pour éviter de surcharger les serveurs en envoyant trop de requêtes trop rapidement.
 
-fetch_and_insert_books(max_books=50, workers=10)  # Vous pouvez ajuster le nombre de workers ici.
+fetch_and_insert_books(max_books=1700, workers=5)  # Vous pouvez ajuster le nombre de workers ici.
