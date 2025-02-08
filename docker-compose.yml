@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:14
+    restart: always
+    environment:
+      POSTGRES_DB: library       # Correspond à DATABASES['default']['NAME']
+      POSTGRES_USER: postgres    # Correspond à DATABASES['default']['USER']
+      POSTGRES_PASSWORD: password  # Correspond à DATABASES['default']['PASSWORD']
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"  # Expose le port PostgreSQL sur la machine hôte
+
+volumes:
+  postgres_data:

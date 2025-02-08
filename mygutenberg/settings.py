@@ -40,25 +40,14 @@ INSTALLED_APPS = [
     'book',
     'rest_framework',
     'drf_spectacular',
+    'corsheaders',  # Ajout de corsheaders
 ]
 
-REST_FRAMEWORK = {
-    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 10,
-}
-
-SPECTACULAR_SETTINGS = {
-    'TITLE': 'Library API',
-    'DESCRIPTION': 'API for read books',
-    'VERSION': '1.0.0',
-    'SERVE_INCLUDE_SCHEMA': False,
-}
-
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',  # Placer le middleware CORS en premier
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
+    'django.middleware.common.CommonMiddleware',  # Important pour corsheaders
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -142,3 +131,8 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# Configuration CORS
+# En développement, on autorise toutes les origines (attention en production, il faudra restreindre cette autorisation)
+CORS_ALLOW_ALL_ORIGINS = True
