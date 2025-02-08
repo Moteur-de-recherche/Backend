@@ -44,8 +44,8 @@ Installation et Configuration
 1. Cloner le Dépôt
 bash
 Copier
-git clone <URL_DU_DEPOT>
-cd <nom_du_projet>
+git clone Moteur de Recherche
+cd Backend
 2. Créer un Environnement Virtuel
 bash
 Copier
