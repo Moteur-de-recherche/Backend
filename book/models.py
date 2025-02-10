@@ -1,3 +1,4 @@
+import json
 from django.db import models
 
 class Author(models.Model):
@@ -15,7 +16,7 @@ class Author(models.Model):
 class Book(models.Model):
     title = models.CharField(max_length=200)
     authors = models.ManyToManyField(Author)
-    language = models.CharField(max_length=100)  # Langue sous forme de chaîne séparée par des virgules
+    language = models.CharField(max_length=100)
     description = models.TextField(null=True, blank=True)
     subjects = models.TextField(null=True, blank=True)
     bookshelves = models.TextField(null=True, blank=True)
@@ -43,9 +44,14 @@ class Index(models.Model):
     word = models.CharField(max_length=255, db_index=True)
     book = models.ForeignKey(Book, on_delete=models.CASCADE, db_index=True)
     occurrences_count = models.IntegerField()
-
+    positions = models.JSONField(default=list, blank=True)
     class Meta:
         unique_together = ('word', 'book')
 
     def __str__(self):
         return f"{self.word} in {self.book.title}"
+
+    def get_positions(self):
+        if self.positions:
+            return self.positions
+        return []

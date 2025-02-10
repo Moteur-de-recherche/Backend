@@ -17,4 +17,4 @@ class BookSerializer(serializers.ModelSerializer):
 class IndexSerializer(serializers.ModelSerializer):
     class Meta:
         model = Index
-        fields = ['id', 'word', 'book', 'occurrences_count']
+        fields = ['id', 'word', 'book', 'occurrences_count','positions']
