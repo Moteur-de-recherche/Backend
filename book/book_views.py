@@ -1,12 +1,14 @@
 import re
 import logging
 import json
+import networkx as nx
+from fuzzywuzzy import fuzz  # Pour la distance Levenshtein
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import generics
 from rest_framework.pagination import PageNumberPagination
 from rest_framework import status
-from django.db.models import Q
+from django.db.models import Q, Count
 from .models import Book, Index
 from .serializers import BookSerializer
 from nltk.tokenize import word_tokenize
@@ -40,75 +42,134 @@ class BookSearchView(generics.ListAPIView):
         query = self.request.query_params.get("q", "").strip().lower()
         if not query:
             return Book.objects.none()
-        
+
         indexed_books = Index.objects.filter(word=query).select_related("book")
 
         # Récupérer les IDs des livres concernés
         book_ids = indexed_books.values_list("book_id", flat=True).distinct()
         return Book.objects.filter(id__in=book_ids)
 
+    def jaccard_similarity(self, set1, set2):
+        """Calcul de la similarité de Jaccard entre deux ensembles."""
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+        return intersection / union if union != 0 else 0
+
+    def levenshtein_similarity(self, title1, title2):
+        """Calcul de la similarité Levenshtein entre deux titres."""
+        return fuzz.ratio(title1, title2) / 100  # Normalisé entre 0 et 1
+
+    def get_similar_books_from_graph(self, book, all_books):
+        """Retourne les voisins dans le graphe de Jaccard pour un livre donné."""
+        similar_books = []
+        book_keywords = set(Index.objects.filter(book_id=book.id).values_list('word', flat=True))
+        
+        for other_book in all_books:
+            if book.id == other_book.id:
+                continue
+            other_book_keywords = set(Index.objects.filter(book_id=other_book.id).values_list('word', flat=True))
+            jaccard_score = self.jaccard_similarity(book_keywords, other_book_keywords)
+            
+            # Ajouter les livres voisins dans le graphe
+            if jaccard_score > 0.1:  # Seuil à ajuster
+                similar_books.append({
+                    "book": BookSerializer(other_book).data,
+                    "jaccard_similarity": jaccard_score
+                })
+        
+        return similar_books
+
     def list(self, request, *args, **kwargs):
+        query = request.query_params.get("q", "").strip().lower()
+        if not query:
+            return self.get_paginated_response([])
+
         queryset = self.get_queryset()
         page = self.paginate_queryset(queryset)
+        if not page:
+            return self.get_paginated_response([])
 
-        query = request.query_params.get("q", "").strip().lower()
-        occurrences_dict = {
-            entry.book_id: entry.occurrences_count
-            for entry in Index.objects.filter(word=query)
-        }
+        # Récupération des occurrences et index liés aux livres
+        index_entries = Index.objects.filter(book_id__in=[book.id for book in page])
+        occurrences_dict = {entry.book_id: entry.occurrences_count for entry in index_entries}
 
-        results = []
+        # Calcul du PageRank
+        pagerank_scores = compute_pagerank(page, index_entries) or {}
+
+        # Calcul des livres similaires via Jaccard et Levenshtein
+        similar_books = []
         for book in page:
             book_data = BookSerializer(book).data
             book_data["occurrences_count"] = occurrences_dict.get(book.id, 0)
-            results.append(book_data)
+            book_data["pagerank_score"] = pagerank_scores.get(book.id, 0)
+
+            # Calcul des voisins dans le graphe de Jaccard
+            similar_books_for_current = self.get_similar_books_from_graph(book, page)
+
+            book_data["similar_books"] = similar_books_for_current
+            similar_books.append(book_data)
+
+        # Trier par occurrences et PageRank combiné
+        results = sorted(similar_books, key=lambda x: (x["occurrences_count"], x["pagerank_score"]), reverse=True)
 
         return self.get_paginated_response(results)
+
 
 class BookAdvancedSearchView(APIView):
     pagination_class = CustomPagination
 
     def get(self, request):
-        query = self.request.query_params.get("q", "")
+        query = self.request.query_params.get("q", "").strip()
 
         if not query:
-            return Response({"detail": "No query provided."}, status=400)
+            return Response({"detail": "No query provided."}, status=status.HTTP_400_BAD_REQUEST)
 
-        def execute_search():
-            try:
-                # Limitation à un nombre maximum de résultats pour éviter la surcharge de la base de données
-                # Si vous avez un grand volume de livres, utilisez un nombre raisonnable de résultats
-                max_results = 100  # Vous pouvez ajuster ce nombre selon votre besoin
+        try:
+            max_results = 100  # Limite des résultats
 
-                # Recherche dans le contenu textuel des livres (text_content)
-                books_by_text_content = Book.objects.filter(
-                    Q(text_content__regex=query)
-                ).distinct()[:max_results]  # Limiter à un certain nombre de résultats
+            # Recherche dans le texte des livres avec regex
+            books_by_text_content = Book.objects.filter(
+                Q(text_content__regex=query)
+            ).distinct()[:max_results]
 
-                # Recherche dans les mots de l'index (Index)
-                books_in_index = Book.objects.filter(
-                    Q(index__word__regex=query)
-                ).distinct()[:max_results]  # Limiter également dans l'index
+            # Recherche dans l'index avec regex et comptage des occurrences
+            indexed_books = Index.objects.filter(
+                word__regex=query
+            ).values("book_id").annotate(occurrence_count=Count("id"))
 
-                # Combine les deux résultats (les livres peuvent apparaître dans les deux)
-                books = books_by_text_content | books_in_index
+            # Récupération des livres trouvés dans l'index
+            book_ids = [entry["book_id"] for entry in indexed_books]
+            books_in_index = Book.objects.filter(id__in=book_ids)
 
-                return books
-            except Exception as e:
-                return str(e)
+            # Fusionner les résultats et supprimer les doublons
+            books = (books_by_text_content | books_in_index).distinct()
 
-        # Exécution de la recherche
-        books = execute_search()
+            # Calculer le score de pertinence (ex: occurrence_count + PageRank)
+            pagerank_scores = compute_pagerank(books, Index.objects.filter(book_id__in=[b.id for b in books]))
+            book_scores = {book.id: pagerank_scores.get(book.id, 0) for book in books}
 
-        # Pagination des résultats
-        paginator = CustomPagination()
-        result_page = paginator.paginate_queryset(books, request)
-        
-        if result_page is not None:
-            serialized_books = BookSerializer(result_page, many=True)
-            return paginator.get_paginated_response(serialized_books.data)
 
-        return Response({"detail": "No results found."}, status=404)
+            # Ajouter le nombre d'occurrences des mots-clés dans l'index
+            for entry in indexed_books:
+                book_id = entry["book_id"]
+                book_scores[book_id] += entry["occurrence_count"]
+
+            # Trier les livres par pertinence
+            sorted_books = sorted(books, key=lambda book: book_scores.get(book.id, 0), reverse=True)
+
+            # Pagination des résultats
+            paginator = CustomPagination()
+            result_page = paginator.paginate_queryset(sorted_books, request)
+            
+            if result_page is not None:
+                serialized_books = BookSerializer(result_page, many=True)
+                return paginator.get_paginated_response(serialized_books.data)
+
+            return Response({"detail": "No results found."}, status=status.HTTP_404_NOT_FOUND)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class BookHighlightSearchView(APIView):
     pagination_class = CustomPagination
@@ -167,3 +228,32 @@ class BookHighlightSearchView(APIView):
         highlighted_text += text[last_pos:]
         logging.debug(f"Highlighted Text: {highlighted_text}")
         return highlighted_text
+    
+    
+def compute_pagerank(books, index_entries):
+    G = nx.Graph()
+
+    # Ajouter les livres comme nœuds
+    book_ids = {book.id for book in books}
+    for book_id in book_ids:
+        G.add_node(book_id)
+
+    # Ajouter des arêtes basées sur la similarité Jaccard des mots-clés
+    book_word_sets = {
+        book_id: set(entry.word for entry in index_entries if entry.book_id == book_id)
+        for book_id in book_ids
+    }
+
+    for book1 in book_ids:
+        for book2 in book_ids:
+            if book1 != book2:
+                intersection = book_word_sets[book1] & book_word_sets[book2]
+                union = book_word_sets[book1] | book_word_sets[book2]
+                if union:
+                    jaccard_similarity = len(intersection) / len(union)
+                    if jaccard_similarity > 0:  # Ajouter une arête si similarité > 0
+                        G.add_edge(book1, book2, weight=jaccard_similarity)
+
+    # Calculer le PageRank
+    pagerank_scores = nx.pagerank(G, weight='weight')
+    return pagerank_scores
