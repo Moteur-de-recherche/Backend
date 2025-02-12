@@ -40,13 +40,24 @@ class BookSearchView(generics.ListAPIView):
 
     def get_queryset(self):
         query = self.request.query_params.get("q", "").strip().lower()
-        if not query:
+        author = self.request.query_params.get("author", "").strip().lower()
+        
+        if not query and not author:
             return Book.objects.none()
 
+        # Filtrer les livres par mot-clé
         indexed_books = Index.objects.filter(word=query).select_related("book")
+        book_ids_by_keyword = indexed_books.values_list("book_id", flat=True).distinct()
 
-        # Récupérer les IDs des livres concernés
-        book_ids = indexed_books.values_list("book_id", flat=True).distinct()
+        # Filtrer les livres par auteur
+        if author:
+            books_by_author = Book.objects.filter(authors__name__icontains=author).values_list("id", flat=True).distinct()
+        else:
+            books_by_author = Book.objects.values_list("id", flat=True).distinct()
+
+        # Combiner les filtres
+        book_ids = set(book_ids_by_keyword) & set(books_by_author)
+        
         return Book.objects.filter(id__in=book_ids).order_by("id")
 
     def jaccard_similarity(self, set1, set2):
@@ -81,7 +92,8 @@ class BookSearchView(generics.ListAPIView):
 
     def list(self, request, *args, **kwargs):
         query = request.query_params.get("q", "").strip().lower()
-        if not query:
+        author = request.query_params.get("author", "").strip().lower()
+        if not query and not author:
             return self.get_paginated_response([])
 
         queryset = self.get_queryset()
@@ -113,7 +125,6 @@ class BookSearchView(generics.ListAPIView):
         results = sorted(similar_books, key=lambda x: (x["occurrences_count"], x["pagerank_score"]), reverse=True)
 
         return self.get_paginated_response(results)
-
 
 class BookAdvancedSearchView(APIView):
     pagination_class = CustomPagination

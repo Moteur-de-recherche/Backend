@@ -50,8 +50,8 @@ MyGutenberg est un projet de gestion de livres avec des fonctionnalités de rech
 
 - **URL** : `/api/books/search/`
 - **Méthode** : `GET`
-- **Paramètre** : `q` (mot recherché)
-- **Description** : Recherche des livres contenant le mot recherché dans l'index.
+- **Paramètre** : `q` (mot recherché) & `author`
+- **Description** : Recherche des livres contenant le mot recherché dans l'index ainsi que l'auteur (non obligatoire).
 
 ### Recherche avancée de livres
 

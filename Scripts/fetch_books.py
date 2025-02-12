@@ -7,7 +7,7 @@ import logging
 import time
 from tqdm import tqdm
 from django.db import transaction
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException, ConnectionError, Timeout
 
 logging.basicConfig(level=logging.INFO)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -18,9 +18,9 @@ from book.models import Book, Author
 
 session = requests.Session()
 
-MAX_RETRIES = 5  # Nombre maximum de tentatives
+MAX_RETRIES = 10  # Augmenter le nombre maximum de tentatives
 BACKOFF_FACTOR = 2  # Facteur de backoff exponentiel (attente doublée à chaque tentative)
-TIMEOUT = 30  # Timeout initial en secondes
+TIMEOUT = 60  # Augmenter le timeout initial en secondes
 
 def fetch_book_text(book_data):
     text_url = None
@@ -46,17 +46,17 @@ def fetch_book_text(book_data):
                     return None, 0
                 word_count = len(text_content.split())
                 return text_content[:100000], word_count
-        except RequestException as e:
+
+        except (RequestException, ConnectionError, Timeout) as e:
             attempt += 1
-            backoff_time = BACKOFF_FACTOR ** attempt  # Exponential backoff
-            logging.error(f"Erreur lors du téléchargement du livre {book_data['id']}: {e}. Tentative {attempt}/{MAX_RETRIES}. Nouvelle tentative dans {backoff_time}s...")
+            backoff_time = min(30, BACKOFF_FACTOR ** attempt)  # Limiter l'attente max à 30s
+            logging.error(f"Erreur téléchargement livre {book_data['id']} (tentative {attempt}/{MAX_RETRIES}): {e}. "
+                          f"Nouvelle tentative dans {backoff_time}s...")
             time.sleep(backoff_time)
-        except Exception as e:
-            logging.error(f"Erreur inattendue pour le livre {book_data['id']}: {e}")
-            break
 
     logging.error(f"Échec du téléchargement du livre {book_data['id']} après {MAX_RETRIES} tentatives.")
     return None, 0
+
 
 def process_book(book_data):
     try:
@@ -118,28 +118,28 @@ def fetch_and_insert_books(max_books=50, workers=5):
         books_to_process = []
         futures = []
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            while url and total_books_fetched < max_books:
-                logging.info(f"Récupération des livres depuis {url}")
-                response = session.get(url)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        while url and total_books_fetched < max_books:
+            logging.info(f"Récupération des livres depuis {url}")
+            response = session.get(url)
 
-                if response.status_code == 200:
-                    data = response.json()
-                    books_data = data.get('results', [])
+            if response.status_code == 200:
+                data = response.json()
+                books_data = data.get('results', [])
 
-                    for book_data in books_data:
-                        futures.append(executor.submit(process_book, book_data))
-                    
-                    # Attendre que les tâches en cours se terminent
-                    for future in as_completed(futures):
-                        book = future.result()
-                        if book:
-                            books_to_process.append(book)
-                            pbar.update(1)
-                            total_books_fetched += 1
+                futures = {executor.submit(process_book, book_data): book_data for book_data in books_data}
 
-                url = data.get('next')
-                logging.info(f"Livres récupérés jusqu'ici : {total_books_fetched}")
-                time.sleep(0.5)  # Optionnel : pour éviter de surcharger les serveurs en envoyant trop de requêtes trop rapidement.
+            # Attendre que chaque future se termine avant d'en lancer un autre
+                for future in as_completed(futures):
+                    book = future.result()
+                    if book:
+                        pbar.update(1)
+                        total_books_fetched += 1
+
+            url = data.get('next')
+            logging.info(f"URL suivante : {url}")
+            logging.info(f"Livres récupérés jusqu'ici : {total_books_fetched}")
+            time.sleep(2)  # Pause pour éviter de surcharger le serveur
+
 
 fetch_and_insert_books(max_books=1700, workers=5)  # Vous pouvez ajuster le nombre de workers ici.

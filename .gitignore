@@ -1,0 +1,10 @@
+book/__pycache__/
+book/migrations/__pycache__/
+mygutenberg/__pycache__/
+.gitignore
+book/__pycache__/urls.cpython-312.pyc
+book/__pycache__/serializers.cpython-312.pyc
+book/__pycache__/models.cpython-312.pyc
+book/__pycache__/apps.cpython-312.pyc
+book/__pycache__/admin.cpython-312.pyc
+book/__pycache__/__init__.cpython-312.pyc

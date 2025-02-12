@@ -45,10 +45,10 @@ def extract_words_with_positions(text, language='english'):
     word_positions = {}
     
     for match in re.finditer(r'\b\w+\b', text):  # Trouver chaque mot et sa position
-        word = match.group()  # Extraire le mot
+        word = match.group().lower()  # Convertir le mot en minuscules
         pos = match.start()  # Position en caractères
         
-        if word.lower() not in stop_words:
+        if word not in stop_words:
             if word not in word_positions:
                 word_positions[word] = []
             word_positions[word].append(pos) 
