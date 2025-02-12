@@ -40,6 +40,8 @@ INSTALLED_APPS = [
     'book',
     'rest_framework',
     'drf_spectacular',
+    'corsheaders',  # Ajout de corsheaders
+
 ]
 
 REST_FRAMEWORK = {
@@ -63,6 +65,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # Placer le middleware CORS en premier
+
 ]
 
 ROOT_URLCONF = 'mygutenberg.urls'
@@ -142,3 +146,6 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# CORS settings
+CORS_ALLOW_ALL_ORIGINS = True

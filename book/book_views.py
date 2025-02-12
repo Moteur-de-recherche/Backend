@@ -47,7 +47,7 @@ class BookSearchView(generics.ListAPIView):
 
         # Récupérer les IDs des livres concernés
         book_ids = indexed_books.values_list("book_id", flat=True).distinct()
-        return Book.objects.filter(id__in=book_ids)
+        return Book.objects.filter(id__in=book_ids).order_by("id")
 
     def jaccard_similarity(self, set1, set2):
         """Calcul de la similarité de Jaccard entre deux ensembles."""
