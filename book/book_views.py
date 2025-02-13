@@ -131,47 +131,43 @@ class BookAdvancedSearchView(APIView):
 
     def get(self, request):
         query = self.request.query_params.get("q", "").strip()
-
         if not query:
             return Response({"detail": "No query provided."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             max_results = 100  # Limite des résultats
 
-            # Recherche dans le texte des livres avec regex
-            books_by_text_content = Book.objects.filter(
-                Q(text_content__regex=query)
-            ).distinct()[:max_results]
+            # Filtrage full-text AVANT d’appliquer une limite
+            books_by_full_text = Book.objects.filter(Q(text_content__icontains=query)).distinct()
 
-            # Recherche dans l'index avec regex et comptage des occurrences
+            # Appliquer regex directement, SANS slice avant le filter
+            books_by_regex = books_by_full_text.filter(Q(text_content__regex=query)).distinct()[:max_results]
+
+            # Recherche dans l'index
             indexed_books = Index.objects.filter(
                 word__regex=query
             ).values("book_id").annotate(occurrence_count=Count("id"))
 
-            # Récupération des livres trouvés dans l'index
             book_ids = [entry["book_id"] for entry in indexed_books]
             books_in_index = Book.objects.filter(id__in=book_ids)
 
-            # Fusionner les résultats et supprimer les doublons
-            books = (books_by_text_content | books_in_index).distinct()
+            # Fusionner et enlever les doublons
+            books = (books_by_regex | books_in_index).distinct()
 
-            # Calculer le score de pertinence (ex: occurrence_count + PageRank)
+            # Étape 4 : Classement par pertinence avec PageRank et occurrences des mots-clés
             pagerank_scores = compute_pagerank(books, Index.objects.filter(book_id__in=[b.id for b in books]))
             book_scores = {book.id: pagerank_scores.get(book.id, 0) for book in books}
 
-
-            # Ajouter le nombre d'occurrences des mots-clés dans l'index
             for entry in indexed_books:
                 book_id = entry["book_id"]
                 book_scores[book_id] += entry["occurrence_count"]
 
-            # Trier les livres par pertinence
             sorted_books = sorted(books, key=lambda book: book_scores.get(book.id, 0), reverse=True)
 
-            # Pagination des résultats
+            # Pagination
             paginator = CustomPagination()
             result_page = paginator.paginate_queryset(sorted_books, request)
-            
+
             if result_page is not None:
                 serialized_books = BookSerializer(result_page, many=True)
                 return paginator.get_paginated_response(serialized_books.data)
@@ -180,6 +176,8 @@ class BookAdvancedSearchView(APIView):
 
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 
 
 class BookHighlightSearchView(APIView):
@@ -232,7 +230,7 @@ class BookHighlightSearchView(APIView):
         last_pos = 0
         query_length = len(query)
         for pos in positions:
-            pos = int(pos)  # Assurer que la position est un entier
+            pos = int(pos)
             logging.debug(f"Position: {pos}, Last Position: {last_pos}")
             highlighted_text += text[last_pos:pos] + "<mark>" + text[pos:pos+query_length] + "</mark>"
             last_pos = pos + query_length
