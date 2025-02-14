@@ -1,11 +1,16 @@
-from django.urls import path
-from .views import BookList, BookDetail, FrenchBookList, FrenchBookDetail, EnglishBookList, EnglishBookDetail
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .book_views import BookListView, BookDetailView, BookSearchView, BookAdvancedSearchView, BookHighlightSearchView
+from .author_views import AuthorListView, AuthorDetailView
+
+
 
 urlpatterns = [
-    path('books/', BookList.as_view(), name='book-list'),
-    path('book/<int:pk>/', BookDetail.as_view(), name='book-detail'),
-    path('frenchbooks/', FrenchBookList.as_view(), name='french-book-list'),
-    path('frenchbook/<int:pk>/', FrenchBookDetail.as_view(), name='french-book-detail'),
-    path('englishbooks/', EnglishBookList.as_view(), name='english-book-list'),
-    path('englishbook/<int:pk>/', EnglishBookDetail.as_view(), name='english-book-detail'),
+    path('authors/', AuthorListView.as_view(), name='author-list'),
+    path('authors/<int:pk>/', AuthorDetailView.as_view(), name='author-detail'),
+    path('books/', BookListView.as_view(), name='book-list'),
+    path('books/<int:pk>/', BookDetailView.as_view(), name='book-detail'),
+    path('books/search/', BookSearchView.as_view(), name='book-search'),
+    path('books/advanced-search/', BookAdvancedSearchView.as_view(), name='advanced-search'),
+    path('books/highlight-search/', BookHighlightSearchView.as_view(), name='book-highlight-search'),
 ]
